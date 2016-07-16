@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package interval implements an interval tree based on an augmented
-// Left-Leaning Red Black tree.
+// Package interval provides an interval tree.
 package interval
 
 import (
@@ -14,17 +13,13 @@ import (
 	"github.com/biogo/store/llrb"
 )
 
-// Operation mode of the underlying LLRB tree.
+// Implementation of an interval tree.
 const (
-	TD234 = iota
-	BU23
+	// LLRB means an interval tree based on an augmented Left-Leaning Red Black (LLRB) tree.
+	LLRBImpl = iota
+	// BTree means an interval tree based on an augmented B-tree.
+	BTreeImpl
 )
-
-func init() {
-	if Mode != TD234 && Mode != BU23 {
-		panic("interval: unknown mode")
-	}
-}
 
 // ErrInvertedRange is returned if an interval is used where the start value is greater
 // than the end value.
@@ -50,36 +45,95 @@ type Range struct {
 	Start, End Comparable
 }
 
-// OverlapInclusive returns whether the two provided ranges overlap. It
-// defines overlapping as a pair of ranges that share a segment, with both
-// start and end keys treated as inclusive values.
-func (r Range) OverlapInclusive(other Range) bool {
-	return r.End.Compare(other.Start) >= 0 && r.Start.Compare(other.End) <= 0
-}
-
-// OverlapExclusive returns whether the two provided ranges overlap. It defines
-// overlapping as a pair of ranges that share a segment of the keyspace, with the
-// start keys treated as inclusive and the end keys treated as exclusive.
-func (r Range) OverlapExclusive(other Range) bool {
-	return r.End.Compare(other.Start) > 0 && r.Start.Compare(other.End) < 0
-}
-
 // Equal returns whether the two ranges are equal.
 func (r Range) Equal(other Range) bool {
-	return r.End.Equal(other.Start) && r.Start.Equal(other.End)
+	return r.Start.Equal(other.Start) && r.End.Equal(other.End)
 }
 
 // String implements the Stringer interface.
 func (r Range) String() string {
-	return fmt.Sprintf("[%x-%x)", r.Start, r.End)
+	return fmt.Sprintf("{%x-%x}", r.Start, r.End)
 }
 
-// An Interface is a type that can be inserted into a Tree.
+// Overlapper specifies the overlapping relationship.
+type Overlapper interface {
+	// Overlap checks whether two ranges overlap.
+	Overlap(Range, Range) bool
+}
+
+type inclusiveOverlapper struct{}
+
+// Overlap checks where a and b overlap in the inclusive way.
+func (overlapper inclusiveOverlapper) Overlap(a Range, b Range) bool {
+	return a.Start.Compare(b.End) <= 0 && b.Start.Compare(a.End) <= 0
+}
+
+// InclusiveOverlapper defines overlapping as a pair of ranges that share a segment of the keyspace
+// in the inclusive way. "inclusive" means that both start and end keys treated as inclusive values.
+var InclusiveOverlapper = inclusiveOverlapper{}
+
+type exclusiveOverlapper struct{}
+
+// Overlap checks where a and b overlap in the exclusive way.
+func (overlapper exclusiveOverlapper) Overlap(a Range, b Range) bool {
+	return a.Start.Compare(b.End) < 0 && b.Start.Compare(a.End) < 0
+}
+
+// ExclusiveOverlapper defines overlapping as a pair of ranges that share a segment of the keyspace
+// in the exclusive. "exclusive" means that the start keys are treated as inclusive and the end keys
+// are treated as exclusive.
+var ExclusiveOverlapper = exclusiveOverlapper{}
+
+// An Interface is a type that can be inserted into an interval tree.
 type Interface interface {
 	Range() Range
 	// Returns a unique ID for the element.
 	// TODO(nvanbenschoten) Should this be changed to an int64?
 	ID() uintptr
+}
+
+func isValidInterface(a Interface) error {
+	if a == nil {
+		return errors.New("nil interface")
+	}
+	r := a.Range()
+	return rangeError(r)
+}
+
+// Compare returns a value indicating the sort order relationship between a and b. The comparison is
+// performed lexicographically on (a.Range().Start, a.ID()) and (b.Range().Start, b.ID()) tuples
+// where Range().Start is more significant that ID().
+//
+// Given c = Compare(a, b):
+//
+//  c == -1  if (a.Range().Start, a.ID()) < (b.Range().Start, b.ID());
+//  c == 0 if (a.Range().Start, a.ID()) == (b.Range().Start, b.ID()); and
+//  c == 1 if (a.Range().Start, a.ID()) > (b.Range().Start, b.ID()).
+//
+// "c == 0" is equivalent to "Equal(a, b) == true".
+func Compare(a, b Interface) int {
+	startCmp := a.Range().Start.Compare(b.Range().Start)
+	if startCmp != 0 {
+		return startCmp
+	}
+	aID := a.ID()
+	bID := b.ID()
+	if aID < bID {
+		return -1
+	} else if aID > bID {
+		return 1
+	} else {
+		return 0
+	}
+}
+
+// Equal returns a boolean indicating whethter the given Interfaces are equal to each other. If
+// "Equal(a, b) == true", "a.Range().End == b.Range().End" must hold. Otherwise, the interval tree
+// behavior is undefined. "Equal(a, b) == true" is equivalent to "Compare(a, b) == 0". But the
+// former has measurably better performance than the latter. So Equal should be used when only
+// equality state is needed.
+func Equal(a, b Interface) bool {
+	return a.Range().Start.Equal(b.Range().Start) && a.ID() == b.ID()
 }
 
 // A Comparable is a type that describes the ends of a Range.
@@ -89,9 +143,9 @@ type Comparable []byte
 // receiver and the parameter.
 //
 // Given c = a.Compare(b):
-//  c < 0 if a < b;
+//  c == -1 if a < b;
 //  c == 0 if a == b; and
-//  c > 0 if a > b.
+//  c == 1 if a > b.
 //
 func (c Comparable) Compare(o Comparable) int {
 	return bytes.Compare(c, o)
@@ -104,7 +158,67 @@ func (c Comparable) Equal(o Comparable) bool {
 	return bytes.Equal(c, o)
 }
 
-// A Node represents a node in a Tree.
+// An Operation is a function that operates on an Interface. If done is returned true, the
+// Operation is indicating that no further work needs to be done and so the DoMatching function
+// should traverse no further.
+type Operation func(Interface) (done bool)
+
+// A Tree is an interval tree.
+type Tree interface {
+	// Insert inserts the Interface e into the tree. Insertions may replace an existing Interface
+	// which is equal to the Interface e.
+	Insert(e Interface, fast bool) (err error)
+	// AdjustRanges fixes range fields for all nodes in the tree. This must be called before Get, Do or
+	// DoMatching* is used if fast insertion or deletion has been performed.
+	AdjustRanges()
+	// Delete deletes the Interface e if it exists in the BTree. The deleted Interface is equal to the
+	// Interface e.
+	Delete(e Interface, fast bool) (err error)
+	// Get returns a slice of Interfaces that overlap r in the tree. The slice is sorted nondecreasingly
+	// by interval start.
+	Get(r Range) (o []Interface)
+	// GetWithOverlapper returns a slice of Interfaces that overlap r in the tree using the provided
+	// overlapper function. The slice is sorted nondecreasingly by interval start.
+	GetWithOverlapper(r Range, overlapper Overlapper) (o []Interface)
+	// DoMatching performs fn on all intervals stored in the tree that overlaps r. The traversal is done
+	// in the nondecreasing order of interval start. A boolean is returned indicating whether the
+	// traversal was interrupted by an Operation returning true. If fn alters stored intervals' sort
+	// relationships, future tree operation behaviors are undefined.
+	DoMatching(fn Operation, r Range) bool
+	// Do performs fn on all intervals stored in the tree. The traversal is done in the nondecreasing
+	// order of interval start. A boolean is returned indicating whether the traversal was interrupted
+	// by an Operation returning true. If fn alters stored intervals' sort relationships, future tree
+	// operation behaviors are undefined.
+	Do(fn Operation) bool
+	// Len returns the number of Interfaces currently in the tree.
+	Len() int
+}
+
+// New creates a new interval tree.
+func New(overlapper Overlapper) Tree {
+	switch Impl {
+	case LLRBImpl:
+		return &LLRB{Overlapper: overlapper}
+	case BTreeImpl:
+		return NewBTree(overlapper)
+	default:
+		panic("interval: unknown implementation")
+	}
+}
+
+// Operation mode of the underlying LLRB tree.
+const (
+	TD234 = iota
+	BU23
+)
+
+func init() {
+	if Mode != TD234 && Mode != BU23 {
+		panic("interval: unknown mode")
+	}
+}
+
+// A Node represents a node in a LLRB tree.
 type Node struct {
 	Elem        Interface
 	Range       Range
@@ -112,11 +226,11 @@ type Node struct {
 	Color       llrb.Color
 }
 
-// A Tree manages the root node of an interval tree. Public methods are exposed through this type.
-type Tree struct {
-	Root       *Node                   // root node of the tree.
-	Count      int                     // number of elements stored.
-	Overlapper func(Range, Range) bool // determines how to define Range overlap.
+// A LLRB Tree manages the root node of an interval tree. Public methods are exposed through this type.
+type LLRB struct {
+	Root       *Node // root node of the tree.
+	Count      int   // number of elements stored.
+	Overlapper Overlapper
 }
 
 // Helper methods
@@ -246,28 +360,26 @@ func (n *Node) moveRedRight() *Node {
 	return n
 }
 
-// Len returns the number of intervals stored in the Tree.
-func (t *Tree) Len() int {
+// Len implements the Tree interface.
+func (t *LLRB) Len() int {
 	return t.Count
 }
 
-// Get returns a slice of Interfaces that overlap r in the Tree.
-func (t *Tree) Get(r Range) (o []Interface) {
+// Get implements the Tree interface.
+func (t *LLRB) Get(r Range) (o []Interface) {
 	return t.GetWithOverlapper(r, t.Overlapper)
 }
 
-// GetWithOverlapper returns a slice of Interfaces that overlap r
-// in the Tree using the provided overlapper function.
-func (t *Tree) GetWithOverlapper(r Range, overlapper func(Range, Range) bool) (o []Interface) {
-	if t.Root != nil && overlapper(r, t.Root.Range) {
-		t.Root.doMatch(func(e Interface) (done bool) { o = append(o, e); return }, r, overlapper)
+// GetWithOverlapper implements the Tree interface.
+func (t *LLRB) GetWithOverlapper(r Range, overlapper Overlapper) (o []Interface) {
+	if t.Root != nil && overlapper.Overlap(r, t.Root.Range) {
+		t.Root.doMatch(func(e Interface) (done bool) { o = append(o, e); return }, r, overlapper.Overlap)
 	}
 	return
 }
 
-// AdjustRanges fixes range fields for all Nodes in the Tree. This must be called
-// before Get or DoMatching* is used if fast insertion or deletion has been performed.
-func (t *Tree) AdjustRanges() {
+// AdjustRanges implements the Tree interface.
+func (t *LLRB) AdjustRanges() {
 	if t.Root == nil {
 		return
 	}
@@ -284,9 +396,8 @@ func (n *Node) adjustRanges() {
 	n.adjustRange()
 }
 
-// Insert inserts the Interface e into the Tree. Insertions may replace
-// existing stored intervals.
-func (t *Tree) Insert(e Interface, fast bool) (err error) {
+// Insert implements the Tree interface.
+func (t *LLRB) Insert(e Interface, fast bool) (err error) {
 	r := e.Range()
 	if err := rangeError(r); err != nil {
 		return err
@@ -355,8 +466,8 @@ func (n *Node) insert(e Interface, min Comparable, id uintptr, fast bool) (root 
 	return
 }
 
-// DeleteMin deletes the left-most interval.
-func (t *Tree) DeleteMin(fast bool) {
+// DeleteMin deletes the leftmost interval.
+func (t *LLRB) DeleteMin(fast bool) {
 	if t.Root == nil {
 		return
 	}
@@ -386,8 +497,8 @@ func (n *Node) deleteMin(fast bool) (root *Node, d int) {
 	return
 }
 
-// DeleteMax deletes the right-most interval.
-func (t *Tree) DeleteMax(fast bool) {
+// DeleteMax deletes the rightmost interval.
+func (t *LLRB) DeleteMax(fast bool) {
 	if t.Root == nil {
 		return
 	}
@@ -420,13 +531,13 @@ func (n *Node) deleteMax(fast bool) (root *Node, d int) {
 	return
 }
 
-// Delete deletes the element e if it exists in the Tree.
-func (t *Tree) Delete(e Interface, fast bool) (err error) {
+// Delete implements the Tree interface.
+func (t *LLRB) Delete(e Interface, fast bool) (err error) {
 	r := e.Range()
 	if err := rangeError(r); err != nil {
 		return err
 	}
-	if t.Root == nil || !t.Overlapper(r, t.Root.Range) {
+	if t.Root == nil || !t.Overlapper.Overlap(r, t.Root.Range) {
 		return
 	}
 	var d int
@@ -478,8 +589,8 @@ func (n *Node) delete(min Comparable, id uintptr, fast bool) (root *Node, d int)
 	return
 }
 
-// Min returns the left-most interval stored in the tree.
-func (t *Tree) Min() Interface {
+// Min returns the leftmost interval stored in the tree.
+func (t *LLRB) Min() Interface {
 	if t.Root == nil {
 		return nil
 	}
@@ -492,8 +603,8 @@ func (n *Node) min() *Node {
 	return n
 }
 
-// Max returns the right-most interval stored in the tree.
-func (t *Tree) Max() Interface {
+// Max returns the rightmost interval stored in the tree.
+func (t *LLRB) Max() Interface {
 	if t.Root == nil {
 		return nil
 	}
@@ -508,7 +619,7 @@ func (n *Node) max() *Node {
 
 // Floor returns the largest value equal to or less than the query q according to
 // q.Start.Compare(), with ties broken by comparison of ID() values.
-func (t *Tree) Floor(q Interface) (o Interface, err error) {
+func (t *LLRB) Floor(q Interface) (o Interface, err error) {
 	if t.Root == nil {
 		return
 	}
@@ -547,7 +658,7 @@ func (n *Node) floor(m Comparable, id uintptr) *Node {
 
 // Ceil returns the smallest value equal to or greater than the query q according to
 // q.Start.Compare(), with ties broken by comparison of ID() values.
-func (t *Tree) Ceil(q Interface) (o Interface, err error) {
+func (t *LLRB) Ceil(q Interface) (o Interface, err error) {
 	if t.Root == nil {
 		return
 	}
@@ -584,15 +695,8 @@ func (n *Node) ceil(m Comparable, id uintptr) *Node {
 	return n
 }
 
-// An Operation is a function that operates on an Interface. If done is returned true, the
-// Operation is indicating that no further work needs to be done and so the Do function should
-// traverse no further.
-type Operation func(Interface) (done bool)
-
-// Do performs fn on all intervals stored in the tree. A boolean is returned indicating whether the
-// Do traversal was interrupted by an Operation returning true. If fn alters stored intervals' sort
-// relationships, future tree operation behaviors are undefined.
-func (t *Tree) Do(fn Operation) bool {
+// Do implements the Tree interface.
+func (t *LLRB) Do(fn Operation) bool {
 	if t.Root == nil {
 		return false
 	}
@@ -619,7 +723,7 @@ func (n *Node) do(fn Operation) (done bool) {
 // DoReverse performs fn on all intervals stored in the tree, but in reverse of sort order. A boolean
 // is returned indicating whether the Do traversal was interrupted by an Operation returning true.
 // If fn alters stored intervals' sort relationships, future tree operation behaviors are undefined.
-func (t *Tree) DoReverse(fn Operation) bool {
+func (t *LLRB) DoReverse(fn Operation) bool {
 	if t.Root == nil {
 		return false
 	}
@@ -643,16 +747,10 @@ func (n *Node) doReverse(fn Operation) (done bool) {
 	return
 }
 
-// DoMatching performs fn on all intervals stored in the tree that match r according to
-// t.Overlapper, with Overlapper() used to guide tree traversal, so DoMatching() will
-// outperform Do() with a called conditional function if the condition is based on sort
-// order, but can not be reliably used if the condition is independent of sort order. A
-// boolean is returned indicating whether the Do traversal was interrupted by an Operation
-// returning true. If fn alters stored intervals' sort relationships, future tree operation
-// behaviors are undefined.
-func (t *Tree) DoMatching(fn Operation, r Range) bool {
-	if t.Root != nil && t.Overlapper(r, t.Root.Range) {
-		return t.Root.doMatch(fn, r, t.Overlapper)
+// DoMatching implements the Tree interface.
+func (t *LLRB) DoMatching(fn Operation, r Range) bool {
+	if t.Root != nil && t.Overlapper.Overlap(r, t.Root.Range) {
+		return t.Root.doMatch(fn, r, t.Overlapper.Overlap)
 	}
 	return false
 }
@@ -682,9 +780,9 @@ func (n *Node) doMatch(fn Operation, r Range, overlaps func(Range, Range) bool) 
 // be reliably used if the condition is independent of sort order. A boolean is returned indicating
 // whether the Do traversal was interrupted by an Operation returning true. If fn alters stored
 // intervals' sort relationships, future tree operation behaviors are undefined.
-func (t *Tree) DoMatchingReverse(fn Operation, r Range) bool {
-	if t.Root != nil && t.Overlapper(r, t.Root.Range) {
-		return t.Root.doMatchReverse(fn, r, t.Overlapper)
+func (t *LLRB) DoMatchingReverse(fn Operation, r Range) bool {
+	if t.Root != nil && t.Overlapper.Overlap(r, t.Root.Range) {
+		return t.Root.doMatchReverse(fn, r, t.Overlapper.Overlap)
 	}
 	return false
 }

@@ -93,6 +93,7 @@ func NewBTreeWithDegreeAndFreeList(overlapper Overlapper, degree int, f *FreeLis
 		panic("bad degree")
 	}
 	return &BTree{
+		height:     -1,
 		degree:     degree,
 		freelist:   f,
 		overlapper: overlapper,
@@ -315,6 +316,7 @@ func (t *BTree) Get(r Range) (o []Interface) {
 
 // GetWithOverlapper implements the Tree interface.
 func (t *BTree) GetWithOverlapper(r Range, overlapper Overlapper) (o []Interface) {
+	t.metrics("Traversal")
 	if err := rangeError(r); err != nil {
 		return
 	}
@@ -327,6 +329,7 @@ func (t *BTree) GetWithOverlapper(r Range, overlapper Overlapper) (o []Interface
 
 // DoMatching implements the Tree interface.
 func (t *BTree) DoMatching(fn Operation, r Range) bool {
+	t.metrics("Traversal")
 	if err := rangeError(r); err != nil {
 		return false
 	}
@@ -770,6 +773,8 @@ func (n *node) print(w io.Writer, level int) {
 type BTree struct {
 	degree     int
 	length     int
+	height     int
+	nodeCount  int
 	root       *node
 	freelist   *FreeList
 	overlapper Overlapper
@@ -845,12 +850,14 @@ func (t *BTree) minInterfaces() int {
 }
 
 func (t *BTree) newNode() (n *node) {
+	t.nodeCount++
 	n = t.freelist.newNode()
 	n.t = t
 	return
 }
 
 func (t *BTree) freeNode(n *node) {
+	t.nodeCount--
 	for i := range n.interfaces {
 		n.interfaces[i] = nil // clear to allow GC
 	}
@@ -865,6 +872,7 @@ func (t *BTree) freeNode(n *node) {
 
 // Insert implements the Tree interface.
 func (t *BTree) Insert(e Interface, fast bool) (err error) {
+	t.metrics("Insert")
 	if err = isValidInterface(e); err != nil {
 		return
 	}
@@ -873,6 +881,7 @@ func (t *BTree) Insert(e Interface, fast bool) (err error) {
 		t.root = t.newNode()
 		t.root.interfaces = append(t.root.interfaces, e)
 		t.length++
+		t.height++
 		if !fast {
 			t.root.Range.Start = e.Range().Start
 			t.root.Range.End = e.Range().End
@@ -881,6 +890,7 @@ func (t *BTree) Insert(e Interface, fast bool) (err error) {
 	} else if len(t.root.interfaces) >= t.maxInterfaces() {
 		oldroot := t.root
 		t.root = t.newNode()
+		t.height++
 		if !fast {
 			t.root.Range.Start = oldroot.Range.Start
 			t.root.Range.End = oldroot.Range.End
@@ -898,6 +908,7 @@ func (t *BTree) Insert(e Interface, fast bool) (err error) {
 
 // Delete implements the Tree interface.
 func (t *BTree) Delete(e Interface, fast bool) (err error) {
+	t.metrics("Delete")
 	if err = isValidInterface(e); err != nil {
 		return
 	}
@@ -911,6 +922,7 @@ func (t *BTree) Delete(e Interface, fast bool) (err error) {
 func (t *BTree) delete(e Interface, typ toRemove, fast bool) Interface {
 	out, _ := t.root.remove(e, t.minInterfaces(), typ, fast)
 	if len(t.root.interfaces) == 0 && len(t.root.children) > 0 {
+		t.height--
 		oldroot := t.root
 		t.root = t.root.children[0]
 		t.freeNode(oldroot)
@@ -924,4 +936,8 @@ func (t *BTree) delete(e Interface, typ toRemove, fast bool) Interface {
 // Len implements the Tree interface.
 func (t *BTree) Len() int {
 	return t.length
+}
+
+func (t *BTree) metrics(op string) {
+	fmt.Printf("%s h%d n%d l%d\n", op, t.height, t.nodeCount, t.length)
 }

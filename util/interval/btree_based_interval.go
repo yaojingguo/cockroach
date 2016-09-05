@@ -316,7 +316,7 @@ func (t *BTree) Get(r Range) (o []Interface) {
 
 // GetWithOverlapper implements the Tree interface.
 func (t *BTree) GetWithOverlapper(r Range, overlapper Overlapper) (o []Interface) {
-	t.metrics("Traversal")
+	// t.metrics("Traversal")
 	if err := rangeError(r); err != nil {
 		return
 	}
@@ -329,7 +329,7 @@ func (t *BTree) GetWithOverlapper(r Range, overlapper Overlapper) (o []Interface
 
 // DoMatching implements the Tree interface.
 func (t *BTree) DoMatching(fn Operation, r Range) bool {
-	t.metrics("Traversal")
+	// t.metrics("Traversal")
 	if err := rangeError(r); err != nil {
 		return false
 	}
@@ -872,7 +872,7 @@ func (t *BTree) freeNode(n *node) {
 
 // Insert implements the Tree interface.
 func (t *BTree) Insert(e Interface, fast bool) (err error) {
-	t.metrics("Insert")
+	// t.metrics("Insert")
 	if err = isValidInterface(e); err != nil {
 		return
 	}
@@ -908,7 +908,7 @@ func (t *BTree) Insert(e Interface, fast bool) (err error) {
 
 // Delete implements the Tree interface.
 func (t *BTree) Delete(e Interface, fast bool) (err error) {
-	t.metrics("Delete")
+	// t.metrics("Delete")
 	if err = isValidInterface(e); err != nil {
 		return
 	}

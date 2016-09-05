@@ -56,7 +56,7 @@ func NewFreeList(size int) *FreeList {
 	return &FreeList{freelist: make([]*node, 0, size)}
 }
 
-func (f *FreeList) newNode(minInterfaces int) (n *node) {
+func (f *FreeList) newNode() (n *node) {
 	index := len(f.freelist) - 1
 	if index < 0 {
 		n = new(node)
@@ -240,7 +240,8 @@ func (n *node) split(i int, fast bool) (Interface, *node) {
 
 // maybeSplitChild checks if a child should be split, and if so splits it.
 // Returns whether or not a split occurred.
-func (n *node) maybeSplitChild(i, maxInterfaces int, fast bool) bool {
+func (n *node) maybeSplitChild(i int, fast bool) bool {
+	maxInterfaces := n.t.maxInterfaces()
 	if len(n.children[i].interfaces) < maxInterfaces {
 		return false
 	}
@@ -253,7 +254,7 @@ func (n *node) maybeSplitChild(i, maxInterfaces int, fast bool) bool {
 
 // insert inserts an Interface into the subtree rooted at this node, making sure
 // no nodes in the subtree exceed maxInterfaces Interfaces.
-func (n *node) insert(e Interface, maxInterfaces int, fast bool) (out Interface, extended bool) {
+func (n *node) insert(e Interface, fast bool) (out Interface, extended bool) {
 	i, found := n.interfaces.find(e)
 	if found {
 		out = n.interfaces[i]
@@ -275,7 +276,7 @@ func (n *node) insert(e Interface, maxInterfaces int, fast bool) (out Interface,
 		}
 		return
 	}
-	if n.maybeSplitChild(i, maxInterfaces, fast) {
+	if n.maybeSplitChild(i, fast) {
 		inTree := n.interfaces[i]
 		switch Compare(e, inTree) {
 		case -1:
@@ -288,7 +289,7 @@ func (n *node) insert(e Interface, maxInterfaces int, fast bool) (out Interface,
 			return
 		}
 	}
-	out, extended = n.children[i].insert(e, maxInterfaces, fast)
+	out, extended = n.children[i].insert(e, fast)
 	if !fast && extended {
 		extended = false
 		if i == 0 && n.children[0].Range.Start.Compare(n.Range.Start) < 0 {
@@ -844,7 +845,7 @@ func (t *BTree) minInterfaces() int {
 }
 
 func (t *BTree) newNode() (n *node) {
-	n = t.freelist.newNode(t.minInterfaces())
+	n = t.freelist.newNode()
 	n.t = t
 	return
 }
@@ -888,7 +889,7 @@ func (t *BTree) Insert(e Interface, fast bool) (err error) {
 		t.root.interfaces = append(t.root.interfaces, e2)
 		t.root.children = append(t.root.children, oldroot, second)
 	}
-	out, _ := t.root.insert(e, t.maxInterfaces(), fast)
+	out, _ := t.root.insert(e, fast)
 	if out == nil {
 		t.length++
 	}
